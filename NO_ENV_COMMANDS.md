@@ -1,14 +1,80 @@
-# Dual-Stack OKE GVA Commands Without Environment Variables
+# Dual-Stack OKE GVA Engineer Guide
 
-This version avoids exported environment variables. Replace every `<...>` placeholder with the target OCI, subnet, image, gateway, namespace, and node values before running a command.
+This guide shows how to create an IPv4/IPv6 dual-stack Oracle Kubernetes Engine cluster, add a Generic VNIC Attachment node pool with three secondary VNICs per worker, attach those networks to pods with Multus, configure source-based pod routing, and verify pod-to-pod IPv4 and IPv6 traffic.
 
-The commands create an enhanced IPv4/IPv6 OKE cluster, create a GVA node pool with three secondary VNICs per worker, install Multus, create NADs, deploy two routed test pods, and verify pod-to-pod IPv4/IPv6 connectivity.
+This version does not require exported shell environment variables. Replace every `<...>` placeholder directly in the commands before running them.
+
+## What This Builds
+
+| Component | Result |
+|---|---|
+| OKE cluster | Enhanced cluster, VCN-native pod networking, IPv4 and IPv6 enabled |
+| GVA node pool | Two workers, each with three secondary VNICs |
+| Pod network shape | `eth0` from the first GVA secondary VNIC, `net1` and `net2` from the second and third |
+| IP allocation | `oci-ipam` allocates IPv4 and IPv6 addresses on each pod interface |
+| Pod routing | Source-based IPv4 and IPv6 route tables keep traffic on the intended interface |
+
+## Scope
+
+This guide proves pod-to-pod IPv4 and IPv6 connectivity across GVA-backed pod interfaces inside the VCN. It does not prove public IPv6 internet egress, Kubernetes Service dual-stack behavior, DNS A/AAAA behavior, or load balancer behavior.
+
+## Placeholder Rules
+
+- Replace every `<...>` value before running the command that contains it.
+- Keep quotes around placeholder values unless you intentionally need an unquoted numeric JSON value.
+- Run the shell blocks in `bash`.
+- Do not paste private keys, kubeconfig contents, or OCI security tokens into this guide.
+
+## OCI Network Requirements
+
+Before creating the cluster or node pool, confirm the OCI network allows the traffic this test will generate:
+
+| Resource | Required shape |
+|---|---|
+| API, load balancer, worker primary, and GVA secondary subnets | Each selected subnet has IPv4 and IPv6 CIDRs. |
+| GVA secondary subnet capacity | Each GVA secondary subnet has enough free IPv4 and IPv6 capacity for node VNIC addresses and pod IP allocations. |
+| GVA security ingress | Allow IPv4 ICMP from each peer GVA secondary subnet IPv4 CIDR. |
+| GVA security ingress | Allow IPv6 ICMP from each peer GVA secondary subnet IPv6 CIDR. |
+| GVA security egress | Allow IPv4 ICMP to each peer GVA secondary subnet IPv4 CIDR. |
+| GVA security egress | Allow IPv6 ICMP to each peer GVA secondary subnet IPv6 CIDR. |
+| Application traffic | Allow any additional TCP or UDP ports required by your application test. |
+| GVA route table | Keep local VCN routing for GVA subnet-to-subnet pod traffic. No NAT or internet gateway route is required for the pod-to-pod ping tests. |
+| Optional IPv4 public egress | Verify `0.0.0.0/0` through the intended NAT gateway or internet gateway and matching security egress. |
+| Optional IPv6 public egress | Verify `::/0` through the intended IPv6 route target, globally routable IPv6 addressing, and matching security egress. |
+| API endpoint subnet | Allow the operator network to reach the Kubernetes API endpoint. |
+| Worker primary subnet | Preserve the normal OKE worker control-plane and kubelet traffic required by your cluster baseline. |
+
+## Verify Local Tools
+
+These commands prove the local workstation has the required CLIs and OCI CLI flags before any cloud resource is created.
+
+```sh
+# Print local tool versions.
+oci -v
+kubectl version --client
+jq --version
+bash --version | head -n 1
+
+# Confirm the OCI CLI supports the OKE options used by this guide.
+oci ce cluster create --help | grep -- --ip-families
+oci ce node-pool create --help | grep -- --secondary-vnics
+oci ce node-pool create --help | grep -- --cni-type
+```
+
+Expected result:
+
+- The version commands succeed.
+- The `grep` commands find `--ip-families`, `--secondary-vnics`, and `--cni-type`.
 
 ## 1 Create Cluster Input Files
 
+These JSON files keep the OKE cluster create command readable and make the cluster networking choices explicit.
+
 ```sh
+# Keep all generated files in one local directory.
 mkdir -p generated/dualstack-gva
 
+# Tell OKE to use OCI VCN-native pod networking.
 cat > generated/dualstack-gva/cluster-pod-network-options.json <<'EOF'
 [
   {
@@ -17,6 +83,7 @@ cat > generated/dualstack-gva/cluster-pod-network-options.json <<'EOF'
 ]
 EOF
 
+# Enable both IPv4 and IPv6 for the cluster.
 cat > generated/dualstack-gva/ip-families.json <<'EOF'
 [
   "IPv4",
@@ -24,6 +91,7 @@ cat > generated/dualstack-gva/ip-families.json <<'EOF'
 ]
 EOF
 
+# Tell OKE which subnets to use for Kubernetes Service resources of type LoadBalancer.
 cat > generated/dualstack-gva/service-lb-subnet-ids.json <<'EOF'
 [
   "<service_lb_subnet_1_ocid>",
@@ -31,12 +99,20 @@ cat > generated/dualstack-gva/service-lb-subnet-ids.json <<'EOF'
 ]
 EOF
 
+# Validate JSON syntax before calling OCI.
 jq empty generated/dualstack-gva/cluster-pod-network-options.json
 jq empty generated/dualstack-gva/ip-families.json
 jq empty generated/dualstack-gva/service-lb-subnet-ids.json
 ```
 
+Expected result:
+
+- All three `jq empty` commands exit successfully.
+- No OCI resources have been created yet.
+
 ## 2 Create The Dual-Stack OKE Cluster
+
+This command creates the OKE control plane as an enhanced, VCN-native, dual-stack cluster.
 
 ```sh
 oci ce cluster create \
@@ -54,7 +130,11 @@ oci ce cluster create \
   --output json
 ```
 
-Confirm the cluster create work request and cluster settings:
+Expected result:
+
+- The command returns an `opc-work-request-id`.
+
+Confirm the cluster create work request:
 
 ```sh
 oci ce work-request get \
@@ -62,7 +142,16 @@ oci ce work-request get \
   --work-request-id "<cluster_create_work_request_ocid>" \
   --output json \
   | jq '.data | {status, resources, errors}'
+```
 
+Expected result:
+
+- `status` is `SUCCEEDED`.
+- `errors` is empty.
+
+Confirm the cluster settings:
+
+```sh
 oci ce cluster get \
   --region "<oci_region>" \
   --cluster-id "<cluster_ocid>" \
@@ -76,7 +165,16 @@ oci ce cluster get \
     }'
 ```
 
+Expected result:
+
+- `lifecycleState` is `ACTIVE`.
+- `type` is `ENHANCED_CLUSTER`.
+- `clusterPodNetworkOptions` includes `OCI_VCN_IP_NATIVE`.
+- `ipFamilies` includes `IPv4` and `IPv6`.
+
 ## 3 Configure Kubectl
+
+This command writes kubeconfig access for the new cluster and verifies that `kubectl` can reach the Kubernetes API server.
 
 ```sh
 oci ce cluster create-kubeconfig \
@@ -90,7 +188,13 @@ kubectl config use-context "<kubectl_context_name>"
 kubectl cluster-info
 ```
 
+Expected result:
+
+- `kubectl cluster-info` returns the Kubernetes control plane endpoint.
+
 ## 4 Create The Secondary VNIC Payload
+
+This JSON file defines the three GVA secondary VNICs OKE will create and attach to each worker in the node pool. Each VNIC requests IPv6 assignment and 16 pod IP allocation slots.
 
 ```sh
 cat > generated/dualstack-gva/secondary-vnics.json <<'EOF'
@@ -134,9 +238,16 @@ EOF
 jq empty generated/dualstack-gva/secondary-vnics.json
 ```
 
-The payload intentionally omits `applicationResources`.
+Expected result:
+
+- `jq empty` exits successfully.
+- No `applicationResources` field is present.
 
 ## 5 Create The GVA Node Pool
+
+This command creates a two-node OKE worker pool. During node creation, OKE creates and attaches the three secondary VNICs from `secondary-vnics.json` to each worker.
+
+Do not include pod subnet IDs, pod NSG IDs, or `maxPodsPerNode` in this GVA node pool request unless your OCI API version explicitly supports that combination with secondary VNICs.
 
 ```sh
 oci ce node-pool create \
@@ -157,7 +268,11 @@ oci ce node-pool create \
   --output json
 ```
 
-Confirm the node pool and workers:
+Expected result:
+
+- The command returns an `opc-work-request-id`.
+
+Confirm the node pool create work request:
 
 ```sh
 oci ce work-request get \
@@ -165,7 +280,11 @@ oci ce work-request get \
   --work-request-id "<node_pool_create_work_request_ocid>" \
   --output json \
   | jq '.data | {status, resources, errors}'
+```
 
+Confirm the node pool:
+
+```sh
 oci ce node-pool get \
   --region "<oci_region>" \
   --node-pool-id "<node_pool_ocid>" \
@@ -178,23 +297,49 @@ oci ce node-pool get \
       kubernetesVersion: ."kubernetes-version",
       nodeShape: ."node-shape"
     }'
+```
 
+Confirm the workers joined the cluster:
+
+```sh
 kubectl get nodes -l "network=<gva_nodepool_label>" -o wide
 ```
 
+Expected result:
+
+- Two workers are listed.
+- Both workers are `Ready`.
+
 ## 6 Install Multus
 
+Multus provides the Kubernetes `NetworkAttachmentDefinition` CRD and attaches the GVA-backed networks to pods.
+
 ```sh
+# Install the upstream Multus thick-plugin daemonset.
 kubectl apply -f https://raw.githubusercontent.com/k8snetworkplumbingwg/multus-cni/master/deployments/multus-daemonset-thick.yml
+
+# Wait for the Multus daemonset to roll out.
 kubectl -n kube-system rollout status ds/kube-multus-ds --timeout=180s
+
+# Confirm the NetworkAttachmentDefinition CRD exists.
 kubectl get crd network-attachment-definitions.k8s.cni.cncf.io
 ```
 
-## 7 Create NADs
+Expected result:
 
-Preferred generated path:
+- `ds/kube-multus-ds` rolls out successfully.
+- The NAD CRD exists.
+
+## 7 Create NetworkAttachmentDefinitions
+
+The default NAD backs pod `eth0` with the first GVA secondary VNIC and chains `oci-ipvlan` plus `oci-ptp`. The additional NADs back pod `net1` and `net2` with `ipvlan` plus `oci-ipam`.
+
+### Preferred Generated Path
+
+Use the generator when you do not want to hardcode worker host interface names. It creates a short-lived diagnostic pod, discovers matching host interfaces, and writes the NAD YAML.
 
 ```sh
+# Pick a Ready GVA worker node name before running this command.
 bash scripts/generate_nads_from_node.sh \
   --node "<gva_worker_node_name>" \
   --namespace "<test_namespace>" \
@@ -203,14 +348,23 @@ bash scripts/generate_nads_from_node.sh \
   --count 3 \
   --output generated/dualstack-gva/nads.yaml
 
+# Create the namespace first so server-side dry-run can validate namespaced NADs.
 kubectl create namespace "<test_namespace>" --dry-run=client -o yaml | kubectl apply -f -
+
+# Validate without changing the cluster.
 kubectl apply --dry-run=server -f generated/dualstack-gva/nads.yaml
+
+# Create the NADs.
 kubectl apply -f generated/dualstack-gva/nads.yaml
+
+# Confirm the default and additional NADs exist.
 kubectl -n kube-system get network-attachment-definitions gva-if1-default
 kubectl -n "<test_namespace>" get network-attachment-definitions
 ```
 
-Manual fallback when host interface names are already known:
+### Manual Fallback
+
+Use this only when the GVA worker host interface names are already known.
 
 ```sh
 cat > generated/dualstack-gva/nads.yaml <<'EOF'
@@ -290,9 +444,20 @@ spec:
       }
     }
 EOF
+
+kubectl create namespace "<test_namespace>" --dry-run=client -o yaml | kubectl apply -f -
+kubectl apply --dry-run=server -f generated/dualstack-gva/nads.yaml
+kubectl apply -f generated/dualstack-gva/nads.yaml
 ```
 
+Expected result:
+
+- `gva-if1-default` exists in `kube-system`.
+- `if2-oci-ipam` and `if3-oci-ipam` exist in the test namespace.
+
 ## 8 Create Routed Test Pods
+
+These pods receive IPv4 and IPv6 addresses on `eth0`, `net1`, and `net2`. Their startup command configures source-based policy routing so packets sourced from each interface leave through that same interface.
 
 Replace all placeholders in this manifest before applying it.
 
@@ -447,17 +612,34 @@ spec:
           sleep infinity
 EOF
 
+# Validate the pods against the API server without creating them.
 kubectl apply --dry-run=server -f generated/dualstack-gva/pods.yaml
+
+# Create both routed test pods.
 kubectl apply -f generated/dualstack-gva/pods.yaml
+
+# Wait for both pods to become Ready.
 kubectl -n "<test_namespace>" wait --for=condition=Ready pod/gva-dualstack-a pod/gva-dualstack-b --timeout=180s
 ```
 
-## 9 Verify
+Expected result:
+
+- Both pods become `Ready`.
+- The pods schedule on different nodes when two labeled GVA workers are available.
+
+## 9 Verify Interfaces, Routes, And Connectivity
+
+Confirm pod placement and Multus network attachment:
 
 ```sh
 kubectl -n "<test_namespace>" get pods -o wide
 kubectl -n "<test_namespace>" get pod gva-dualstack-a -o jsonpath='{.metadata.annotations.k8s\.v1\.cni\.cncf\.io/network-status}{"\n"}'
 kubectl -n "<test_namespace>" get pod gva-dualstack-b -o jsonpath='{.metadata.annotations.k8s\.v1\.cni\.cncf\.io/network-status}{"\n"}'
+```
+
+Confirm addresses, policy rules, and route tables:
+
+```sh
 kubectl -n "<test_namespace>" exec gva-dualstack-a -- ip -br addr
 kubectl -n "<test_namespace>" exec gva-dualstack-a -- ip rule
 kubectl -n "<test_namespace>" exec gva-dualstack-a -- ip -6 rule
@@ -469,6 +651,13 @@ kubectl -n "<test_namespace>" exec gva-dualstack-a -- ip -6 route show table 202
 kubectl -n "<test_namespace>" exec gva-dualstack-a -- ip -6 route show table 203
 ```
 
+Expected result:
+
+- `eth0`, `net1`, and `net2` each have an IPv4 address.
+- `eth0`, `net1`, and `net2` each have a global IPv6 address.
+- IPv4 rules exist for tables `101`, `102`, and `103`.
+- IPv6 rules exist for tables `201`, `202`, and `203`.
+
 Record the IPv4 and IPv6 addresses from `network-status`, then run interface-bound pings:
 
 ```sh
@@ -478,12 +667,88 @@ kubectl -n "<test_namespace>" exec gva-dualstack-a -- ping -4 -I net2 -c 2 -W 2 
 kubectl -n "<test_namespace>" exec gva-dualstack-a -- ping -6 -I eth0 -c 2 -W 2 "<pod_b_eth0_ipv6>"
 kubectl -n "<test_namespace>" exec gva-dualstack-a -- ping -6 -I net1 -c 2 -W 2 "<pod_b_net1_ipv6>"
 kubectl -n "<test_namespace>" exec gva-dualstack-a -- ping -6 -I net2 -c 2 -W 2 "<pod_b_net2_ipv6>"
+
+kubectl -n "<test_namespace>" exec gva-dualstack-b -- ping -4 -I eth0 -c 2 -W 2 "<pod_a_eth0_ipv4>"
+kubectl -n "<test_namespace>" exec gva-dualstack-b -- ping -4 -I net1 -c 2 -W 2 "<pod_a_net1_ipv4>"
+kubectl -n "<test_namespace>" exec gva-dualstack-b -- ping -4 -I net2 -c 2 -W 2 "<pod_a_net2_ipv4>"
+kubectl -n "<test_namespace>" exec gva-dualstack-b -- ping -6 -I eth0 -c 2 -W 2 "<pod_a_eth0_ipv6>"
+kubectl -n "<test_namespace>" exec gva-dualstack-b -- ping -6 -I net1 -c 2 -W 2 "<pod_a_net1_ipv6>"
+kubectl -n "<test_namespace>" exec gva-dualstack-b -- ping -6 -I net2 -c 2 -W 2 "<pod_a_net2_ipv6>"
 ```
 
+Expected result:
+
+- All pings return `0% packet loss`.
+
 ## 10 Cleanup
+
+Delete the test pods and NADs:
 
 ```sh
 kubectl delete -f generated/dualstack-gva/pods.yaml --ignore-not-found
 kubectl delete -f generated/dualstack-gva/nads.yaml --ignore-not-found
+```
+
+Delete Multus only if no other workloads on the cluster depend on it:
+
+```sh
 kubectl delete -f https://raw.githubusercontent.com/k8snetworkplumbingwg/multus-cni/master/deployments/multus-daemonset-thick.yml
 ```
+
+Delete the GVA node pool only after test workloads are removed. Confirm the target first:
+
+```sh
+oci ce node-pool get \
+  --region "<oci_region>" \
+  --node-pool-id "<node_pool_ocid>" \
+  --output json \
+  | jq '.data | {name, id, lifecycleState: ."lifecycle-state", clusterId: ."cluster-id"}'
+```
+
+Then delete the node pool if it is safe to remove:
+
+```sh
+oci ce node-pool delete \
+  --region "<oci_region>" \
+  --node-pool-id "<node_pool_ocid>" \
+  --force
+```
+
+Delete the cluster only if it was created only for this validation:
+
+```sh
+oci ce cluster get \
+  --region "<oci_region>" \
+  --cluster-id "<cluster_ocid>" \
+  --output json \
+  | jq '.data | {name, id, lifecycleState: ."lifecycle-state"}'
+
+oci ce cluster delete \
+  --region "<oci_region>" \
+  --cluster-id "<cluster_ocid>" \
+  --force
+```
+
+Remove local generated files:
+
+```sh
+rm -rf generated/dualstack-gva
+```
+
+## Evidence To Capture
+
+Capture these outputs for handoff or review:
+
+- Tool versions and OCI CLI feature checks.
+- Cluster create work request output.
+- `oci ce cluster get` output.
+- Node pool create work request output.
+- `oci ce node-pool get` output.
+- `generated/dualstack-gva/secondary-vnics.json`.
+- `generated/dualstack-gva/nads.yaml`.
+- `kubectl -n "<test_namespace>" get pods -o wide`.
+- Pod `network-status` annotations.
+- `ip -br addr`, `ip rule`, `ip -6 rule`, and route table outputs.
+- All IPv4 and IPv6 ping outputs.
+
+Do not capture private keys, kubeconfig content, OCI security tokens, or other credentials.
