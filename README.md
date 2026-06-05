@@ -16,6 +16,7 @@ This guide creates:
 | Pod default network | `eth0` from the first GVA secondary VNIC |
 | Pod additional networks | `net1` and `net2` from the second and third GVA secondary VNICs |
 | Pod routing | Source-based IPv4 and IPv6 routing per pod interface |
+| Pod IPv4 internet egress | Verified with interface-bound IPv4 `curl` from both test pods |
 
 Interface and routing model:
 
@@ -59,7 +60,7 @@ This guide proves pod-to-pod IPv4 and IPv6 connectivity across GVA-backed pod in
 - `kubectl`, `jq`, `envsubst`, and `bash`.
 - An IPv6-enabled VCN.
 - Distinct dual-stack subnets for the OKE API endpoint, service load balancers, worker primary VNICs, and each GVA secondary VNIC.
-- Security lists or network security groups that allow the IPv4 and IPv6 pod traffic you intend to test.
+- Security lists or network security groups that allow pod-to-pod traffic and IPv4 internet egress from the GVA secondary subnets.
 - IAM permissions to manage OKE clusters, node pools, VCN resources, subnets, VNICs, route resources, and security resources.
 - Kubernetes permissions to install Multus, create NetworkAttachmentDefinitions (NADs), create namespaces, and run test pods.
 - Worker shape capacity for one primary VNIC plus three secondary VNICs.
@@ -67,28 +68,19 @@ This guide proves pod-to-pod IPv4 and IPv6 connectivity across GVA-backed pod in
 
 ## OCI Network Requirements
 
-Before creating the cluster or node pool, confirm the OCI network allows the traffic this test will generate:
+Before creating the cluster or node pool, confirm:
 
-- The API endpoint, service load balancer, worker primary VNIC, and GVA secondary VNIC subnets have both IPv4 and IPv6 CIDRs.
-- The three GVA secondary VNIC subnets have enough free IPv4 and IPv6 capacity for node VNIC addresses and pod IP allocations.
-- Security lists or network security groups allow IPv4 ICMP between the three GVA secondary VNIC subnets.
-- Security lists or network security groups allow IPv6 ICMP between the three GVA secondary VNIC subnets.
-- Egress and ingress rules allow any application ports you plan to test beyond ping.
-- Route tables for the selected subnets support the intended traffic path. For public IPv4 egress, verify the NAT gateway or internet gateway path. For public IPv6 egress, verify globally routable IPv6 addressing and the intended IPv6 route target.
-- The IPv4 gateway values used later by `IF1_IPV4_GW`, `IF2_IPV4_GW`, and `IF3_IPV4_GW` match the actual default gateways for the three GVA secondary VNIC subnets.
-
-| Resource | Required shape |
+| Area | Requirement |
 |---|---|
-| GVA secondary subnet security ingress | Allow IPv4 ICMP from each peer GVA secondary subnet IPv4 CIDR. |
-| GVA secondary subnet security ingress | Allow IPv6 ICMP from each peer GVA secondary subnet IPv6 CIDR. |
-| GVA secondary subnet security egress | Allow IPv4 ICMP to each peer GVA secondary subnet IPv4 CIDR. |
-| GVA secondary subnet security egress | Allow IPv6 ICMP to each peer GVA secondary subnet IPv6 CIDR. |
-| GVA secondary subnet security ingress and egress | Allow any additional TCP or UDP ports required by the application test, scoped to the peer subnet CIDRs or test endpoints. |
-| GVA secondary subnet route table | Keep local VCN routing for traffic between GVA secondary subnets. No NAT or internet gateway route is required for the pod-to-pod ping tests inside the VCN. |
-| Optional IPv4 public egress | Add or verify `0.0.0.0/0` through the intended NAT gateway or internet gateway, and allow matching IPv4 egress in the security list or NSG. |
-| Optional IPv6 public egress | Add or verify `::/0` through the intended IPv6 route target, use globally routable IPv6 addressing, and allow matching IPv6 egress in the security list or NSG. |
-| API endpoint subnet security | Allow the client running `kubectl` to reach the Kubernetes API endpoint. For private endpoints, this usually means connectivity from the operator network into the VCN. |
-| Worker primary subnet security | Allow the normal OKE worker control-plane and kubelet traffic required by your cluster baseline. Keep this separate from the GVA secondary subnet rules when possible. |
+| Subnets | API, load balancer, worker primary, and GVA secondary subnets are dual stack. |
+| GVA subnet capacity | Each GVA secondary subnet has enough free IPv4 and IPv6 addresses for node VNICs and pod IPs. |
+| GVA security | Allow IPv4 ICMP and IPv6 ICMP between all GVA secondary subnet CIDRs, both ingress and egress. |
+| Optional app traffic | Allow any TCP or UDP ports required by the workload test. |
+| GVA routing | Keep local VCN routing between GVA secondary subnets. No NAT or internet gateway is needed for in-VCN pod-to-pod ping tests. |
+| IPv4 internet egress | Route `0.0.0.0/0` from each GVA secondary subnet to a NAT gateway or approved IPv4 egress path, and allow matching IPv4 egress in the security list or NSG. |
+| Optional IPv6 public egress | For IPv6, verify `::/0` to the intended IPv6 route target and globally routable IPv6 addressing. |
+| API access | The operator network can reach the Kubernetes API endpoint. |
+| Worker baseline | Worker primary subnet rules still allow normal OKE control-plane and kubelet traffic. |
 
 ## Verify Before Starting
 
@@ -702,7 +694,9 @@ Intent
 
 Create a test pod that receives IPv4 and IPv6 addresses on `eth0`, `net1`, and `net2`, then configures source-based policy routing for each interface.
 
-Routing is necessary because the pod has multiple IPv4 and IPv6 source addresses. Without per-source rules, Linux can send traffic from one interface address out another interface. The rules below keep traffic sourced from `eth0`, `net1`, or `net2` on that same interface.
+Routing is necessary because Linux normally selects routes by destination, not by the interface that owns the source address. In a multihomed GVA pod, `eth0`, `net1`, and `net2` are backed by different OCI VNIC paths and subnets. Without `ip rule from <source-ip> table <table>` entries, traffic sourced from `net1` or `net2` can still leave through the default route for another interface, which can break return traffic, ping tests, IPv4 internet egress, and application flows that expect symmetric interface use.
+
+The IPv4 default routes in tables `101`, `102`, and `103` are intentional. They send internet-bound IPv4 traffic through the gateway for the subnet that owns the selected source address; the OCI route table for that GVA subnet then forwards `0.0.0.0/0` to the NAT gateway or approved IPv4 egress path.
 
 Run
 
@@ -871,6 +865,15 @@ done
 for table in 201 202 203; do
   kubectl -n "$TEST_NAMESPACE" exec gva-dualstack-a -- ip -6 route show table "$table"
 done
+
+# Confirm IPv4 internet egress from each interface in both pods.
+for pod in gva-dualstack-a gva-dualstack-b; do
+  for iface in eth0 net1 net2; do
+    printf '%s %s egress IPv4: ' "$pod" "$iface"
+    kubectl -n "$TEST_NAMESPACE" exec "$pod" -- curl -4 --interface "$iface" -fsS https://ifconfig.me/ip
+    printf '\n'
+  done
+done
 ```
 
 Expected result
@@ -880,6 +883,7 @@ Expected result
 - `eth0`, `net1`, and `net2` each have a global IPv6 address.
 - IPv4 rules exist for priorities `101`, `102`, and `103`.
 - IPv6 rules exist for priorities `201`, `202`, and `203`.
+- Each pod/interface pair returns the IPv4 address seen by the internet egress path.
 
 Extract the pod interface addresses from the Multus `network-status` annotations.
 
