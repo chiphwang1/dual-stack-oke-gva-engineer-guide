@@ -75,8 +75,6 @@ Before creating the cluster or node pool, confirm the OCI network allows the tra
 - Route tables for the selected subnets support the intended traffic path. For public IPv4 egress, verify the NAT gateway or internet gateway path. For public IPv6 egress, verify globally routable IPv6 addressing and the intended IPv6 route target.
 - The IPv4 gateway values used later by `IF1_IPV4_GW`, `IF2_IPV4_GW`, and `IF3_IPV4_GW` match the actual default gateways for the three GVA secondary VNIC subnets.
 
-Concrete route and security shape:
-
 | Resource | Required shape |
 |---|---|
 | GVA secondary subnet security ingress | Allow IPv4 ICMP from each peer GVA secondary subnet IPv4 CIDR. |
