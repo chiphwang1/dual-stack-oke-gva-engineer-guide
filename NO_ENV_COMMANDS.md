@@ -792,3 +792,81 @@ Capture these outputs for handoff or review:
 - All IPv4 and IPv6 ping outputs.
 
 Do not capture private keys, kubeconfig content, OCI security tokens, or other credentials.
+
+## Appendix Manual Pod Routing Commands
+
+Use this if the pods are already running and you need to reapply the routing setup manually. The commands run inside both test pods and require the pod containers to have `NET_ADMIN`.
+
+Use the same subnet CIDR and gateway values used in Step 8.
+
+```sh
+for pod in gva-dualstack-a gva-dualstack-b; do
+  echo "Configuring policy routing in ${pod}"
+  kubectl -n "<test_namespace>" exec "$pod" -- sh -lc '
+    set -eu
+
+    require_value() {
+      name="$1"
+      value="$2"
+      if [ -z "$value" ]; then
+        echo "Missing $name" >&2
+        exit 1
+      fi
+    }
+
+    # Capture the live pod interface addresses.
+    ETH0_IPV4="$(ip -4 -o addr show dev eth0 | awk "{split(\$4,a,\"/\"); print a[1]; exit}")"
+    NET1_IPV4="$(ip -4 -o addr show dev net1 | awk "{split(\$4,a,\"/\"); print a[1]; exit}")"
+    NET2_IPV4="$(ip -4 -o addr show dev net2 | awk "{split(\$4,a,\"/\"); print a[1]; exit}")"
+    ETH0_IPV6="$(ip -6 -o addr show dev eth0 scope global | awk "{split(\$4,a,\"/\"); print a[1]; exit}")"
+    NET1_IPV6="$(ip -6 -o addr show dev net1 scope global | awk "{split(\$4,a,\"/\"); print a[1]; exit}")"
+    NET2_IPV6="$(ip -6 -o addr show dev net2 scope global | awk "{split(\$4,a,\"/\"); print a[1]; exit}")"
+
+    require_value ETH0_IPV4 "$ETH0_IPV4"
+    require_value NET1_IPV4 "$NET1_IPV4"
+    require_value NET2_IPV4 "$NET2_IPV4"
+    require_value ETH0_IPV6 "$ETH0_IPV6"
+    require_value NET1_IPV6 "$NET1_IPV6"
+    require_value NET2_IPV6 "$NET2_IPV6"
+
+    # IPv4: each source address gets a table with that interface subnet and default gateway.
+    ip route replace default via "<secondary_subnet_1_ipv4_gateway>" dev eth0 table 101 || true
+    ip route replace "<secondary_subnet_1_ipv4_cidr>" dev eth0 src "$ETH0_IPV4" table 101 || true
+    ip rule add from "$ETH0_IPV4/32" table 101 priority 101 2>/dev/null || true
+
+    ip route replace default via "<secondary_subnet_2_ipv4_gateway>" dev net1 table 102 || true
+    ip route replace "<secondary_subnet_2_ipv4_cidr>" dev net1 src "$NET1_IPV4" table 102 || true
+    ip rule add from "$NET1_IPV4/32" table 102 priority 102 2>/dev/null || true
+
+    ip route replace default via "<secondary_subnet_3_ipv4_gateway>" dev net2 table 103 || true
+    ip route replace "<secondary_subnet_3_ipv4_cidr>" dev net2 src "$NET2_IPV4" table 103 || true
+    ip rule add from "$NET2_IPV4/32" table 103 priority 103 2>/dev/null || true
+
+    # IPv6: install per-source rules and use discovered default gateways when present.
+    ETH0_IPV6_GW="$(ip -6 route show default dev eth0 | awk "/ via / {print \$3; exit}")"
+    NET1_IPV6_GW="$(ip -6 route show default dev net1 | awk "/ via / {print \$3; exit}")"
+    NET2_IPV6_GW="$(ip -6 route show default dev net2 | awk "/ via / {print \$3; exit}")"
+
+    ip -6 route replace "<secondary_subnet_1_ipv6_cidr>" dev eth0 src "$ETH0_IPV6" table 201 || true
+    [ -n "$ETH0_IPV6_GW" ] && ip -6 route replace default via "$ETH0_IPV6_GW" dev eth0 table 201 || true
+    ip -6 rule add from "$ETH0_IPV6/128" table 201 priority 201 2>/dev/null || true
+
+    ip -6 route replace "<secondary_subnet_2_ipv6_cidr>" dev net1 src "$NET1_IPV6" table 202 || true
+    [ -n "$NET1_IPV6_GW" ] && ip -6 route replace default via "$NET1_IPV6_GW" dev net1 table 202 || true
+    ip -6 rule add from "$NET1_IPV6/128" table 202 priority 202 2>/dev/null || true
+
+    ip -6 route replace "<secondary_subnet_3_ipv6_cidr>" dev net2 src "$NET2_IPV6" table 203 || true
+    [ -n "$NET2_IPV6_GW" ] && ip -6 route replace default via "$NET2_IPV6_GW" dev net2 table 203 || true
+    ip -6 rule add from "$NET2_IPV6/128" table 203 priority 203 2>/dev/null || true
+
+    ip rule
+    ip -6 rule
+    ip route show table 101
+    ip route show table 102
+    ip route show table 103
+    ip -6 route show table 201
+    ip -6 route show table 202
+    ip -6 route show table 203
+  '
+done
+```
