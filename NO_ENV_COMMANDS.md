@@ -2,8 +2,6 @@
 
 This guide shows how to create an IPv4/IPv6 dual-stack Oracle Kubernetes Engine cluster, add a Generic VNIC Attachment node pool with three secondary VNICs per worker, attach those networks to pods with Multus, configure source-based pod routing, and verify pod-to-pod IPv4 and IPv6 traffic.
 
-This version does not require exported shell environment variables. Replace every `<...>` placeholder directly in the commands before running them.
-
 ## What This Builds
 
 | Component | Result |
@@ -13,6 +11,37 @@ This version does not require exported shell environment variables. Replace ever
 | Pod network shape | `eth0` from the first GVA secondary VNIC, `net1` and `net2` from the second and third |
 | IP allocation | `oci-ipam` allocates IPv4 and IPv6 addresses on each pod interface |
 | Pod routing | Source-based IPv4 and IPv6 route tables keep traffic on the intended interface |
+
+## Interface And Routing Model
+
+```mermaid
+flowchart LR
+  subgraph worker["OKE worker in GVA node pool"]
+    if1["first GVA secondary VNIC<br/>host_if1"]
+    if2["second GVA secondary VNIC<br/>host_if2"]
+    if3["third GVA secondary VNIC<br/>host_if3"]
+  end
+
+  subgraph nads["Multus NetworkAttachmentDefinitions"]
+    default_nad["kube-system/gva-if1-default<br/>oci-ipvlan + oci-ptp<br/>Multus default network"]
+    nad2["test_namespace/if2-oci-ipam"]
+    nad3["test_namespace/if3-oci-ipam"]
+  end
+
+  subgraph pod["test pod"]
+    eth0["eth0<br/>IPv4 + IPv6<br/>tables 101 and 201"]
+    net1["net1<br/>IPv4 + IPv6<br/>tables 102 and 202"]
+    net2["net2<br/>IPv4 + IPv6<br/>tables 103 and 203"]
+  end
+
+  if1 --> default_nad --> eth0
+  if2 --> nad2 --> net1
+  if3 --> nad3 --> net2
+
+  eth0 --> r1["source-based routes keep eth0 traffic on host_if1"]
+  net1 --> r2["source-based routes keep net1 traffic on host_if2"]
+  net2 --> r3["source-based routes keep net2 traffic on host_if3"]
+```
 
 ## Scope
 
