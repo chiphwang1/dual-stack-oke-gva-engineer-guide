@@ -2,6 +2,8 @@
 
 This guide is for a customer engineer configuring IPv4 and IPv6 dual stack on Oracle Kubernetes Engine (OKE) with Generic VNIC Attachment (GVA), Multus, and `oci-ipam`.
 
+For a copy-paste command version without exported environment variables, see [NO_ENV_COMMANDS.md](NO_ENV_COMMANDS.md).
+
 GVA attaches secondary Virtual Network Interface Cards (VNICs) to OKE worker nodes. Multus attaches VNIC-backed networks to pods. NetworkAttachmentDefinitions (NADs) are the Kubernetes custom resources Multus uses to describe those networks. `oci-ipam` allocates pod IPv4 and IPv6 addresses from OCI-backed interfaces.
 
 This guide creates:
@@ -267,26 +269,40 @@ Create an enhanced OKE cluster using VCN-native pod networking and both IP famil
 Run
 
 ```sh
-# Create the OKE control plane with dual-stack IPv4 and IPv6 enabled.
-oci ce cluster create \
-  --region "$REGION" \
-  --compartment-id "$COMPARTMENT_OCID" \
-  --name "$CLUSTER_NAME" \
-  --vcn-id "$VCN_OCID" \
-  --kubernetes-version "$KUBERNETES_VERSION" \
-  --type ENHANCED_CLUSTER \
-  --cluster-pod-network-options "file://$(pwd)/generated/dualstack-gva/cluster-pod-network-options.json" \
-  --ip-families "file://$(pwd)/generated/dualstack-gva/ip-families.json" \
-  --endpoint-subnet-id "$ENDPOINT_SUBNET_OCID" \
-  --endpoint-public-ip-enabled "$ENDPOINT_PUBLIC_IP_ENABLED" \
-  --service-lb-subnet-ids "file://$(pwd)/generated/dualstack-gva/service-lb-subnet-ids.json" \
+# Create a rendered cluster-create script with the current variable values filled in.
+cat > generated/dualstack-gva/create-cluster.sh <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+
+oci ce cluster create \\
+  --region "${REGION}" \\
+  --compartment-id "${COMPARTMENT_OCID}" \\
+  --name "${CLUSTER_NAME}" \\
+  --vcn-id "${VCN_OCID}" \\
+  --kubernetes-version "${KUBERNETES_VERSION}" \\
+  --type ENHANCED_CLUSTER \\
+  --cluster-pod-network-options "file://$(pwd)/generated/dualstack-gva/cluster-pod-network-options.json" \\
+  --ip-families "file://$(pwd)/generated/dualstack-gva/ip-families.json" \\
+  --endpoint-subnet-id "${ENDPOINT_SUBNET_OCID}" \\
+  --endpoint-public-ip-enabled "${ENDPOINT_PUBLIC_IP_ENABLED}" \\
+  --service-lb-subnet-ids "file://$(pwd)/generated/dualstack-gva/service-lb-subnet-ids.json" \\
   --output json
+EOF
+
+chmod +x generated/dualstack-gva/create-cluster.sh
+
+# Inspect the rendered command before creating the cluster.
+sed -n '1,40p' generated/dualstack-gva/create-cluster.sh
+
+# Create the OKE control plane with dual-stack IPv4 and IPv6 enabled.
+bash generated/dualstack-gva/create-cluster.sh
 ```
 
 Expected result
 
 - The command returns an `opc-work-request-id`.
 - The work request succeeds.
+- `generated/dualstack-gva/create-cluster.sh` contains the actual values from your environment, not unresolved shell variables.
 
 Confirm
 
@@ -338,7 +354,7 @@ oci ce cluster create-kubeconfig \
   --file "$HOME/.kube/config" \
   --region "$REGION" \
   --token-version 2.0.0 \
-  --kube-endpoint <PUBLIC_ENDPOINT_or_PRIVATE_ENDPOINT>
+  --kube-endpoint "<PUBLIC_ENDPOINT_or_PRIVATE_ENDPOINT>"
 
 # Select the expected kubectl context.
 kubectl config use-context "$CLUSTER_CONTEXT"
@@ -422,23 +438,36 @@ Create a two-node worker pool. During this operation, OKE creates each worker no
 Run
 
 ```sh
-# Create the GVA node pool. OKE creates and attaches the secondary VNICs from the JSON payload.
-oci ce node-pool create \
-  --region "$REGION" \
-  --compartment-id "$COMPARTMENT_OCID" \
-  --cluster-id "$CLUSTER_OCID" \
-  --name "$NODE_POOL_NAME" \
-  --kubernetes-version "$KUBERNETES_VERSION" \
-  --node-shape "$NODE_SHAPE" \
-  --node-shape-config "{\"ocpus\":${NODE_OCPUS},\"memoryInGBs\":${NODE_MEMORY_GB}}" \
-  --size 2 \
-  --cni-type OCI_VCN_IP_NATIVE \
-  --placement-configs "[{\"availabilityDomain\":\"${AVAILABILITY_DOMAIN}\",\"subnetId\":\"${PRIMARY_NODE_SUBNET_OCID}\"}]" \
-  --node-source-details "{\"sourceType\":\"IMAGE\",\"imageId\":\"${NODE_IMAGE_OCID}\"}" \
-  --initial-node-labels "[{\"key\":\"network\",\"value\":\"${GVA_NODEPOOL_LABEL}\"},{\"key\":\"gva.oraclecloud.com/secondary-vnics\",\"value\":\"3\"}]" \
-  --ssh-public-key "$SSH_PUBLIC_KEY" \
-  --secondary-vnics "file://$(pwd)/generated/dualstack-gva/secondary-vnics.json" \
+# Create a rendered node-pool create script with the current variable values filled in.
+cat > generated/dualstack-gva/create-node-pool.sh <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+
+oci ce node-pool create \\
+  --region "${REGION}" \\
+  --compartment-id "${COMPARTMENT_OCID}" \\
+  --cluster-id "${CLUSTER_OCID}" \\
+  --name "${NODE_POOL_NAME}" \\
+  --kubernetes-version "${KUBERNETES_VERSION}" \\
+  --node-shape "${NODE_SHAPE}" \\
+  --node-shape-config "{\\"ocpus\\":${NODE_OCPUS},\\"memoryInGBs\\":${NODE_MEMORY_GB}}" \\
+  --size 2 \\
+  --cni-type OCI_VCN_IP_NATIVE \\
+  --placement-configs "[{\\"availabilityDomain\\":\\"${AVAILABILITY_DOMAIN}\\",\\"subnetId\\":\\"${PRIMARY_NODE_SUBNET_OCID}\\"}]" \\
+  --node-source-details "{\\"sourceType\\":\\"IMAGE\\",\\"imageId\\":\\"${NODE_IMAGE_OCID}\\"}" \\
+  --initial-node-labels "[{\\"key\\":\\"network\\",\\"value\\":\\"${GVA_NODEPOOL_LABEL}\\"},{\\"key\\":\\"gva.oraclecloud.com/secondary-vnics\\",\\"value\\":\\"3\\"}]" \\
+  --ssh-public-key "${SSH_PUBLIC_KEY}" \\
+  --secondary-vnics "file://$(pwd)/generated/dualstack-gva/secondary-vnics.json" \\
   --output json
+EOF
+
+chmod +x generated/dualstack-gva/create-node-pool.sh
+
+# Inspect the rendered command before creating the node pool.
+sed -n '1,60p' generated/dualstack-gva/create-node-pool.sh
+
+# Create the GVA node pool. OKE creates and attaches the secondary VNICs from the JSON payload.
+bash generated/dualstack-gva/create-node-pool.sh
 ```
 
 Expected result
@@ -447,6 +476,7 @@ Expected result
 - The work request succeeds.
 - Two GVA workers join the cluster.
 - Each GVA worker has three secondary VNICs created from the node-pool request.
+- `generated/dualstack-gva/create-node-pool.sh` contains the actual values from your environment, not unresolved shell variables.
 
 Confirm
 
@@ -513,7 +543,7 @@ Run
 
 ```sh
 # Install the Multus thick-plugin daemonset.
-kubectl apply -f <multus_thick_daemonset_manifest_url>
+kubectl apply -f https://raw.githubusercontent.com/k8snetworkplumbingwg/multus-cni/master/deployments/multus-daemonset-thick.yml
 
 # Wait until the Multus daemonset is available.
 kubectl -n kube-system rollout status ds/kube-multus-ds --timeout=180s
@@ -951,7 +981,7 @@ kubectl delete -f generated/dualstack-gva/nads.yaml --ignore-not-found
 Delete Multus only if no other workloads on the cluster depend on it.
 
 ```sh
-kubectl delete -f <multus_thick_daemonset_manifest_url>
+kubectl delete -f https://raw.githubusercontent.com/k8snetworkplumbingwg/multus-cni/master/deployments/multus-daemonset-thick.yml
 ```
 
 Delete the GVA node pool only after the test pods and NADs are removed. This is destructive. Confirm the target before deleting it.
