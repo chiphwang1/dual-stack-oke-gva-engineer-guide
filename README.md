@@ -94,8 +94,6 @@ This guide does not pin exact minimum versions for OKE, OCI CLI, `kubectl`, or M
 
 The subnet variables in this guide identify existing subnets consumed by cluster and node-pool creation. This guide does not create the VCN or subnets.
 
-Use a tested Multus manifest URL for your environment. The examples below keep that URL in `MULTUS_MANIFEST_URL` so you can pin it to a release, tag, or commit instead of relying on a moving branch.
-
 Run these local checks before creating OCI resources:
 
 ```sh
@@ -184,9 +182,6 @@ export IF1_IPV6_CIDR="<secondary_subnet_1_ipv6_cidr>"
 export IF2_IPV6_CIDR="<secondary_subnet_2_ipv6_cidr>"
 export IF3_IPV6_CIDR="<secondary_subnet_3_ipv6_cidr>"
 
-# Pin this to the Multus manifest version validated for the target cluster.
-export MULTUS_MANIFEST_URL="<tested_multus_thick_daemonset_manifest_url>"
-
 # Fail before creating resources if any required input is unset or still a placeholder.
 required_vars=(
   REGION COMPARTMENT_OCID VCN_OCID CLUSTER_NAME CLUSTER_CONTEXT KUBERNETES_VERSION
@@ -195,7 +190,7 @@ required_vars=(
   PRIMARY_NODE_SUBNET_OCID SECONDARY_SUBNET_IF1_OCID SECONDARY_SUBNET_IF2_OCID SECONDARY_SUBNET_IF3_OCID
   TEST_NAMESPACE GVA_NODEPOOL_LABEL HOST_IF1 HOST_IF2 HOST_IF3
   IF1_IPV4_CIDR IF2_IPV4_CIDR IF3_IPV4_CIDR IF1_IPV4_GW IF2_IPV4_GW IF3_IPV4_GW
-  IF1_IPV6_CIDR IF2_IPV6_CIDR IF3_IPV6_CIDR MULTUS_MANIFEST_URL
+  IF1_IPV6_CIDR IF2_IPV6_CIDR IF3_IPV6_CIDR
 )
 
 for var in "${required_vars[@]}"; do
@@ -517,8 +512,8 @@ Install Multus so pods can use the GVA-backed networks.
 Run
 
 ```sh
-# Install the Multus thick-plugin daemonset from the tested manifest URL.
-kubectl apply -f "$MULTUS_MANIFEST_URL"
+# Install the Multus thick-plugin daemonset.
+kubectl apply -f <multus_thick_daemonset_manifest_url>
 
 # Wait until the Multus daemonset is available.
 kubectl -n kube-system rollout status ds/kube-multus-ds --timeout=180s
@@ -956,7 +951,7 @@ kubectl delete -f generated/dualstack-gva/nads.yaml --ignore-not-found
 Delete Multus only if no other workloads on the cluster depend on it.
 
 ```sh
-kubectl delete -f "$MULTUS_MANIFEST_URL"
+kubectl delete -f <multus_thick_daemonset_manifest_url>
 ```
 
 Delete the GVA node pool only after the test pods and NADs are removed. This is destructive. Confirm the target before deleting it.
